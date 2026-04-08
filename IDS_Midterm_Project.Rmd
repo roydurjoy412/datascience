@@ -1,0 +1,760 @@
+---
+title: "Introduction to Data Science - Midterm Project"
+author: "Durjoy Roy (23-50576-1), Maruf Ahmmed (23-50604-1), Anuja Sarker (23-50624-1)"
+date: "April 5, 2026"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    highlight: tango
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# 1. About the Dataset
+
+The **Telco Customer Churn** dataset is sourced from the IBM Sample Dataset, 
+available on Kaggle 
+(https://www.kaggle.com/datasets/blastchar/telco-customer-churn). 
+It contains information about a telecom company's customers, including 
+demographic details, account information, and services subscribed. 
+The target variable is **Churn** (Yes/No), indicating whether a customer 
+left the company. The original dataset has 7043 rows and 21 variables. 
+For this project, a random subsample of 1500 rows is used as per the 
+course requirement.
+
+# 2. Objectives
+
+The objectives of this project are:
+
+- To apply data preparation and cleaning techniques on a real-world dataset
+- To handle missing values, outliers, duplicates, and inconsistent formats
+- To perform Exploratory Data Analysis (EDA) on key variables
+- To analyze and compare descriptive statistics across the two target 
+  classes (Churn: Yes / No)
+- To demonstrate normalization, encoding, filtering, balancing, and 
+  train/test splitting techniques
+
+# 3. Load Libraries and Dataset
+```{r load-data}
+library(tidyverse)
+library(naniar)
+library(ROSE)
+library(caTools)
+library(psych)
+library(scales)
+library(gridExtra)
+library(VIM)
+
+# Load dataset
+raw_data <- read.csv("WA_Fn-UseC_-Telco-Customer-Churn.csv")
+
+# Check dimensions
+dim(raw_data)
+head(raw_data, 5)
+```
+
+# 4. Subsample the Dataset
+```{r subsample}
+# Fix TotalCharges column (stored as character, should be numeric)
+raw_data$TotalCharges <- as.numeric(raw_data$TotalCharges)
+
+# Take random subsample of 1500 rows
+set.seed(42)
+df <- raw_data %>% sample_n(1500)
+
+# Verify dimensions
+dim(df)
+cat("Rows:", nrow(df), "| Columns:", ncol(df))
+```
+**Interpretation:**
+The original dataset contains 7043 rows. As per the course requirement 
+of maximum 2000 rows, a random subsample of 1500 rows is taken using 
+set.seed(42) to ensure reproducibility. TotalCharges was converted from 
+character to numeric as it contained numeric values stored incorrectly.
+
+# 5. Intentional Data Corruption
+
+To simulate real-world data quality issues, the following problems 
+are intentionally introduced into the dataset.
+```{r corrupt-data}
+df_dirty <- df
+
+# 1. Introduce missing values in MonthlyCharges and tenure
+set.seed(123)
+na_idx1 <- sample(1:nrow(df_dirty), 60)
+na_idx2 <- sample(1:nrow(df_dirty), 40)
+df_dirty$MonthlyCharges[na_idx1] <- NA
+df_dirty$tenure[na_idx2] <- NA
+
+# 2. Introduce impossible/invalid values
+df_dirty$tenure[5]  <- -99
+df_dirty$tenure[10] <- 999
+df_dirty$MonthlyCharges[15] <- -50
+
+# 3. Introduce inconsistent format in gender column
+df_dirty$gender[c(1,2,3)] <- "male"
+df_dirty$gender[c(4,5)]   <- "FEMALE"
+
+# 4. Add duplicate rows
+dup_rows <- df_dirty[sample(1:nrow(df_dirty), 30), ]
+df_dirty <- rbind(df_dirty, dup_rows)
+
+# Verify corruption
+cat("Total rows after duplicates:", nrow(df_dirty), "\n")
+cat("Missing values - MonthlyCharges:", sum(is.na(df_dirty$MonthlyCharges)), "\n")
+cat("Missing values - tenure:", sum(is.na(df_dirty$tenure)), "\n")
+cat("Unique gender values:", unique(df_dirty$gender), "\n")
+cat("Dataset saved as df_dirty for cleaning phase.\n")
+```
+**Interpretation:**
+Four types of data issues are intentionally introduced:
+1. Missing values: 60 in MonthlyCharges and 40 in tenure
+2. Invalid values: negative and impossibly large values in tenure 
+   and MonthlyCharges
+3. Inconsistent format: gender column contains mixed case 
+   values (male, FEMALE, Male, Female)
+4. Duplicate rows: 30 duplicate rows added, bringing total to 1530
+
+# 6. Data Cleaning
+
+## 6.1 Visualize Missing Values
+```{r missing-viz}
+# Visualize missing values
+vis_miss(df_dirty)
+```
+**Interpretation:**
+The missing value plot shows that MonthlyCharges has approximately 
+4% missing values and tenure has around 2.7% missing values. 
+All other columns have no missing values. This visualization 
+helps identify which variables require imputation before analysis.
+
+## 6.2 Handle Missing Values
+```{r missing-impute}
+df_clean <- df_dirty
+
+# Also impute TotalCharges NA if any remain
+df_clean$TotalCharges[is.na(df_clean$TotalCharges)] <-
+  median(df_clean$TotalCharges, na.rm = TRUE)
+
+# Impute MonthlyCharges with median
+df_clean$MonthlyCharges[is.na(df_clean$MonthlyCharges)] <- 
+  median(df_clean$MonthlyCharges, na.rm = TRUE)
+
+# Impute tenure with median
+df_clean$tenure[is.na(df_clean$tenure)] <- 
+  median(df_clean$tenure, na.rm = TRUE)
+
+# Verify no missing values remain
+cat("Missing in MonthlyCharges:", sum(is.na(df_clean$MonthlyCharges)), "\n")
+cat("Missing in tenure:", sum(is.na(df_clean$tenure)), "\n")
+```
+**Interpretation:**
+Missing values in MonthlyCharges and tenure are imputed using the 
+median value of each respective column. Median is preferred over 
+mean because it is robust to outliers, which is important since 
+invalid values (like -99 and 999) are still present in the data 
+at this stage. After imputation, both columns show 0 missing values.
+
+## 6.3 Remove Invalid Values
+```{r invalid-values}
+# Check invalid values before fixing
+cat("Invalid tenure values (before):\n")
+cat("tenure = -99:", sum(df_clean$tenure == -99), "\n")
+cat("tenure = 999:", sum(df_clean$tenure == 999), "\n")
+cat("MonthlyCharges < 0:", sum(df_clean$MonthlyCharges < 0), "\n")
+
+# Replace invalid values with median
+valid_tenure_median <- median(
+  df_clean$tenure[df_clean$tenure > 0 & df_clean$tenure <= 72], 
+  na.rm = TRUE
+)
+valid_monthly_median <- median(
+  df_clean$MonthlyCharges[df_clean$MonthlyCharges > 0], 
+  na.rm = TRUE
+)
+
+df_clean$tenure[df_clean$tenure == -99] <- valid_tenure_median
+df_clean$tenure[df_clean$tenure == 999] <- valid_tenure_median
+df_clean$MonthlyCharges[df_clean$MonthlyCharges < 0] <- valid_monthly_median
+
+# Verify
+cat("\nInvalid tenure values (after):\n")
+cat("tenure = -99:", sum(df_clean$tenure == -99), "\n")
+cat("tenure = 999:", sum(df_clean$tenure == 999), "\n")
+cat("MonthlyCharges < 0:", sum(df_clean$MonthlyCharges < 0), "\n")
+```
+**Interpretation:**
+Invalid values were detected in tenure (-99 and 999) and 
+MonthlyCharges (negative values), which are logically impossible 
+for these variables. These are replaced with the median of valid 
+values only (tenure between 0-72 months, MonthlyCharges above 0). 
+After correction, all three checks return 0, confirming successful 
+removal of invalid entries.
+
+## 6.4 Fix Inconsistent Format
+```{r fix-format}
+# Check before fixing
+cat("Gender values before fix:\n")
+print(table(df_clean$gender))
+
+# Standardize to title case
+df_clean$gender <- str_to_title(df_clean$gender)
+
+# Verify
+cat("\nGender values after fix:\n")
+print(table(df_clean$gender))
+```
+**Interpretation:**
+The gender column contained inconsistent capitalization (male, 
+FEMALE, Male, Female). Using str_to_title(), all values are 
+standardized to title case (Female, Male). After fixing, only 
+two unique values remain, confirming consistent formatting.
+
+## 6.5 Remove Duplicate Rows
+```{r remove-duplicates}
+# Check duplicates before
+cat("Total rows before removing duplicates:", nrow(df_clean), "\n")
+cat("Duplicate rows found:", sum(duplicated(df_clean)), "\n")
+
+# Remove duplicates
+df_clean <- df_clean %>% distinct()
+
+# Verify
+cat("\nTotal rows after removing duplicates:", nrow(df_clean), "\n")
+cat("Duplicate rows remaining:", sum(duplicated(df_clean)), "\n")
+```
+**Interpretation:**
+30 duplicate rows were intentionally added in the corruption phase. 
+Using distinct() from the dplyr package, all duplicate rows are 
+identified and removed. The dataset returns to 1500 rows with 
+0 duplicates remaining, confirming successful deduplication.
+
+## 6.6 Outlier Detection
+```{r outlier-detect}
+# Boxplot to visualize outliers in numeric columns
+p1 <- ggplot(df_clean, aes(y = MonthlyCharges)) +
+  geom_boxplot(fill = "#3B8BD4", alpha = 0.7) +
+  labs(title = "MonthlyCharges", y = "Value") +
+  theme_minimal()
+
+p2 <- ggplot(df_clean, aes(y = tenure)) +
+  geom_boxplot(fill = "#1D9E75", alpha = 0.7) +
+  labs(title = "Tenure", y = "Value") +
+  theme_minimal()
+
+p3 <- ggplot(df_clean, aes(y = TotalCharges)) +
+  geom_boxplot(fill = "#EF9F27", alpha = 0.7) +
+  labs(title = "TotalCharges", y = "Value") +
+  theme_minimal()
+
+grid.arrange(p1, p2, p3, ncol = 3)
+
+# IQR method to count outliers
+count_outliers <- function(x) {
+  Q1 <- quantile(x, 0.25, na.rm = TRUE)
+  Q3 <- quantile(x, 0.75, na.rm = TRUE)
+  IQR_val <- Q3 - Q1
+  sum(x < (Q1 - 1.5 * IQR_val) | x > (Q3 + 1.5 * IQR_val), na.rm = TRUE)
+}
+
+cat("Outliers in MonthlyCharges:", count_outliers(df_clean$MonthlyCharges), "\n")
+cat("Outliers in tenure:", count_outliers(df_clean$tenure), "\n")
+cat("Outliers in TotalCharges:", count_outliers(df_clean$TotalCharges), "\n")
+```
+**Interpretation:**
+Boxplots are used to visually identify outliers in the three main 
+numeric columns. The IQR (Interquartile Range) method is applied 
+to count outliers mathematically — any value below Q1 - 1.5*IQR 
+or above Q3 + 1.5*IQR is considered an outlier. This provides 
+both a visual and quantitative understanding of extreme values 
+in the dataset.
+
+## 6.7 Handle Outliers
+```{r outlier-handle}
+# Cap outliers using IQR method (Winsorization)
+cap_outliers <- function(x) {
+  Q1 <- quantile(x, 0.25, na.rm = TRUE)
+  Q3 <- quantile(x, 0.75, na.rm = TRUE)
+  IQR_val <- Q3 - Q1
+  lower <- Q1 - 1.5 * IQR_val
+  upper <- Q3 + 1.5 * IQR_val
+  x[x < lower] <- lower
+  x[x > upper] <- upper
+  return(x)
+}
+
+df_clean$MonthlyCharges <- cap_outliers(df_clean$MonthlyCharges)
+df_clean$tenure <- cap_outliers(df_clean$tenure)
+df_clean$TotalCharges <- cap_outliers(df_clean$TotalCharges)
+
+# Verify
+cat("Outliers after capping - MonthlyCharges:", 
+    count_outliers(df_clean$MonthlyCharges), "\n")
+cat("Outliers after capping - tenure:", 
+    count_outliers(df_clean$tenure), "\n")
+cat("Outliers after capping - TotalCharges:", 
+    count_outliers(df_clean$TotalCharges), "\n")
+```
+**Interpretation:**
+Outliers are handled using Winsorization (capping), where values 
+below the lower bound (Q1 - 1.5*IQR) are replaced with the lower 
+bound, and values above the upper bound (Q3 + 1.5*IQR) are replaced 
+with the upper bound. This approach retains all rows while limiting 
+the effect of extreme values. After capping, all three columns 
+show 0 outliers.
+
+# 7. Feature Engineering
+
+## 7.1 Categorical to Numeric Encoding
+```{r encoding}
+# Check current data types
+cat("Before encoding:\n")
+cat("Churn:", class(df_clean$Churn), "| Values:", 
+    unique(df_clean$Churn), "\n")
+cat("gender:", class(df_clean$gender), "| Values:", 
+    unique(df_clean$gender), "\n")
+cat("Partner:", class(df_clean$Partner), "| Values:", 
+    unique(df_clean$Partner), "\n")
+
+# Convert binary categorical columns to numeric (0/1)
+df_clean$Churn_numeric <- ifelse(df_clean$Churn == "Yes", 1, 0)
+df_clean$gender_numeric <- ifelse(df_clean$gender == "Male", 1, 0)
+df_clean$Partner_numeric <- ifelse(df_clean$Partner == "Yes", 1, 0)
+df_clean$Dependents_numeric <- ifelse(df_clean$Dependents == "Yes", 1, 0)
+df_clean$PhoneService_numeric <- ifelse(df_clean$PhoneService == "Yes", 1, 0)
+
+# Verify
+cat("\nAfter encoding:\n")
+cat("Churn_numeric - unique values:", unique(df_clean$Churn_numeric), "\n")
+cat("gender_numeric - unique values:", unique(df_clean$gender_numeric), "\n")
+cat("Partner_numeric - unique values:", unique(df_clean$Partner_numeric), "\n")
+```
+**Interpretation:**
+Five binary categorical columns (Churn, gender, Partner, Dependents, 
+PhoneService) are converted to numeric format (0/1) using ifelse(). 
+New columns are created with the suffix _numeric to preserve the 
+original columns for reference. This encoding is necessary for 
+mathematical operations and statistical analysis in later steps.
+
+## 7.2 Numeric to Categorical Conversion
+```{r numeric-to-cat}
+# Convert tenure to age groups
+df_clean$tenure_group <- cut(
+  df_clean$tenure,
+  breaks = c(0, 12, 36, 72),
+  labels = c("New (0-12m)", "Mid (13-36m)", "Long (37-72m)"),
+  include.lowest = TRUE
+)
+
+# Verify
+cat("Tenure group distribution:\n")
+print(table(df_clean$tenure_group))
+```
+**Interpretation:**
+The continuous tenure column is converted into a categorical variable 
+with three meaningful groups: New customers (0-12 months), Mid-term 
+customers (13-36 months), and Long-term customers (37-72 months). 
+This conversion allows group-based analysis and comparison, which 
+is useful in the EDA phase.
+
+## 7.3 Normalization
+
+```{r normalize}
+# Check range before normalization
+cat("Before normalization:\n")
+cat("MonthlyCharges - Min:", min(df_clean$MonthlyCharges, na.rm = TRUE), 
+    "Max:", max(df_clean$MonthlyCharges, na.rm = TRUE), "\n")
+cat("TotalCharges - Min:", min(df_clean$TotalCharges, na.rm = TRUE), 
+    "Max:", max(df_clean$TotalCharges, na.rm = TRUE), "\n")
+cat("tenure - Min:", min(df_clean$tenure, na.rm = TRUE), 
+    "Max:", max(df_clean$tenure, na.rm = TRUE), "\n")
+
+# Min-Max Normalization (Fixed with na.rm = TRUE)
+min_max_norm <- function(x) {
+  (x - min(x, na.rm = TRUE)) / (max(x, na.rm = TRUE) - min(x, na.rm = TRUE))
+}
+
+df_clean$MonthlyCharges_norm <- min_max_norm(df_clean$MonthlyCharges)
+df_clean$TotalCharges_norm <- min_max_norm(df_clean$TotalCharges)
+df_clean$tenure_norm <- min_max_norm(df_clean$tenure)
+
+# Verify
+cat("\nAfter normalization:\n")
+cat("MonthlyCharges_norm - Min:", round(min(df_clean$MonthlyCharges_norm, na.rm = TRUE), 4),
+    "Max:", round(max(df_clean$MonthlyCharges_norm, na.rm = TRUE), 4), "\n")
+cat("TotalCharges_norm - Min:", round(min(df_clean$TotalCharges_norm, na.rm = TRUE), 4),
+    "Max:", round(max(df_clean$TotalCharges_norm, na.rm = TRUE), 4), "\n")
+cat("tenure_norm - Min:", round(min(df_clean$tenure_norm, na.rm = TRUE), 4),
+    "Max:", round(max(df_clean$tenure_norm, na.rm = TRUE), 4), "\n")
+```
+**Interpretation:**
+Min-Max normalization is applied to MonthlyCharges, TotalCharges, 
+and tenure, scaling all values to a range of 0 to 1. This ensures 
+that no single variable dominates the analysis due to its larger 
+scale. After normalization, all three columns correctly show 
+a minimum of 0 and maximum of 1.
+
+# 8. Data Filtering
+```{r filtering}
+# Filter 1: Senior Citizens who churned
+senior_churn <- df_clean %>%
+  filter(SeniorCitizen == 1 & Churn == "Yes")
+
+cat("Senior citizens who churned:", nrow(senior_churn), "\n")
+
+# Filter 2: Month-to-month contract customers
+monthly_contract <- df_clean %>%
+  filter(Contract == "Month-to-month")
+
+cat("Month-to-month contract customers:", nrow(monthly_contract), "\n")
+
+# Filter 3: High value customers (MonthlyCharges above average)
+avg_charge <- mean(df_clean$MonthlyCharges, na.rm = TRUE)
+high_value <- df_clean %>%
+  filter(MonthlyCharges > avg_charge)
+
+cat("High value customers (above avg charge):", nrow(high_value), "\n")
+cat("Average MonthlyCharges:", round(avg_charge, 2), "\n")
+
+# Filter 4: Long-term customers with no churn
+loyal <- df_clean %>%
+  filter(tenure > 36 & Churn == "No")
+
+cat("Long-term loyal customers (tenure > 36m):", nrow(loyal), "\n")
+```
+**Interpretation:**
+Four meaningful filters are applied to explore specific customer 
+segments:
+1. Senior citizens who churned — identifies vulnerable high-risk group
+2. Month-to-month contract customers — this group is known to have 
+   higher churn rates
+3. High value customers — those paying above average monthly charges
+4. Long-term loyal customers — tenure above 36 months with no churn
+
+These filters help isolate specific subgroups for targeted analysis 
+and support the findings section of the report.
+
+# 9. Class Balancing
+```{r class-balance}
+# Check current class distribution
+cat("Class distribution before balancing:\n")
+print(table(df_clean$Churn))
+cat("\nClass percentage:\n")
+print(round(prop.table(table(df_clean$Churn)) * 100, 2))
+
+# Visualize imbalance
+ggplot(df_clean, aes(x = Churn, fill = Churn)) +
+  geom_bar() +
+  geom_text(stat = "count", aes(label = ..count..), vjust = -0.5) +
+  scale_fill_manual(values = c("#3B8BD4", "#E8593C")) +
+  labs(title = "Class Distribution Before Balancing",
+       x = "Churn", y = "Count") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+**Interpretation:**
+The class distribution shows a significant imbalance — approximately 
+76% customers did not churn (No) and 24% churned (Yes). This kind 
+of imbalance can bias any future analysis or modeling, as the 
+majority class dominates. A bar plot is used to visually confirm 
+this imbalance before applying any balancing technique.
+
+```{r balancing}
+# Prepare clean dataframe for ROSE
+df_rose <- df_clean %>%
+  select(-customerID) %>% # শুধু ID বাদ দিচ্ছি, বাকি সব কলাম থাকবে
+  mutate(
+    TotalCharges = ifelse(is.na(TotalCharges), 
+                          median(TotalCharges, na.rm = TRUE), 
+                          TotalCharges)
+  ) %>%
+  mutate_if(is.character, as.factor) # সব character কে একবারে factor বানিয়ে দেওয়া
+
+# Apply ROSE
+set.seed(42)
+df_balanced <- ROSE(Churn ~ ., data = df_rose, seed = 42)$data
+
+# Check distribution after balancing
+cat("Class distribution after balancing:\n")
+print(table(df_balanced$Churn))
+cat("\nClass percentage after balancing:\n")
+print(round(prop.table(table(df_balanced$Churn)) * 100, 2))
+
+# Visualize balanced classes
+ggplot(df_balanced, aes(x = Churn, fill = Churn)) +
+  geom_bar() +
+  geom_text(stat = "count", aes(label = after_stat(count)), vjust = -0.5) +
+  scale_fill_manual(values = c("#3B8BD4", "#E8593C")) +
+  labs(title = "Class Distribution After Balancing",
+       x = "Churn", y = "Count") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+**Interpretation:**
+Before balancing, the dataset was prepared by handling missing values (using median imputation for TotalCharges) and converting character variables into factors to ensure compatibility with the algorithm. Then, ROSE (Random Over-Sampling Examples) is applied to generate a balanced dataset where both classes (Churn: Yes / No) have approximately equal representation. Unlike simple duplication, ROSE generates synthetic samples, making the balance more robust. After balancing, both classes show approximately 50% distribution, successfully eliminating the previous bias.
+
+# 10. Train/Test Split
+```{r train-test-split}
+# Use df_clean for splitting (retains all original features)
+set.seed(42)
+
+# 80/20 split
+split <- sample.split(df_clean$Churn, SplitRatio = 0.80)
+
+train_data <- subset(df_clean, split == TRUE)
+test_data  <- subset(df_clean, split == FALSE)
+
+# Verify split
+cat("Total rows in df_clean:", nrow(df_clean), "\n")
+cat("Training set rows:", nrow(train_data), "\n")
+cat("Testing set rows:", nrow(test_data), "\n")
+cat("Train ratio:", round(nrow(train_data)/nrow(df_clean)*100, 2), "%\n")
+cat("Test ratio:", round(nrow(test_data)/nrow(df_clean)*100, 2), "%\n")
+
+# Verify class distribution is maintained in both sets
+cat("\nChurn distribution in Training set:\n")
+print(round(prop.table(table(train_data$Churn))*100, 2))
+
+cat("\nChurn distribution in Testing set:\n")
+print(round(prop.table(table(test_data$Churn))*100, 2))
+```
+**Interpretation:**
+The cleaned dataset (df_clean) is split into training (80%) and 
+testing (20%) sets using the caTools package. set.seed(42) ensures 
+reproducibility. sample.split() is used to maintain the original 
+class distribution (stratified split) in both sets, meaning the 
+Churn ratio remains consistent across train and test data. 
+The training set will be used to build models in future analysis, 
+while the testing set evaluates model performance on unseen data.
+
+# 11. Exploratory Data Analysis (EDA)
+
+## 11.1 Descriptive Statistics across Two Target Classes
+
+```{r descriptive-stats}
+# Overall descriptive statistics
+cat("=== Overall Descriptive Statistics ===\n")
+df_clean %>%
+  select(tenure, MonthlyCharges, TotalCharges) %>%
+  summary() %>%
+  print()
+
+# Descriptive statistics by Churn class
+cat("\n=== Statistics for Churn = No ===\n")
+df_clean %>%
+  filter(Churn == "No") %>%
+  select(tenure, MonthlyCharges, TotalCharges) %>%
+  summary() %>%
+  print()
+
+cat("\n=== Statistics for Churn = Yes ===\n")
+df_clean %>%
+  filter(Churn == "Yes") %>%
+  select(tenure, MonthlyCharges, TotalCharges) %>%
+  summary() %>%
+  print()
+
+# Standard deviation by class
+cat("\n=== Standard Deviation by Churn Class ===\n")
+df_clean %>%
+  group_by(Churn) %>%
+  summarise(
+    SD_tenure = round(sd(tenure, na.rm = TRUE), 2),
+    SD_MonthlyCharges = round(sd(MonthlyCharges, na.rm = TRUE), 2),
+    SD_TotalCharges = round(sd(TotalCharges, na.rm = TRUE), 2)
+  ) %>%
+  print()
+```
+**Interpretation:**
+Descriptive statistics are calculated separately for churned (Yes) 
+and non-churned (No) customers. Key observations:
+- Churned customers have significantly lower median tenure, 
+  indicating they leave early in their subscription.
+- MonthlyCharges are higher for churned customers on average, 
+  suggesting price sensitivity as a churn driver.
+- TotalCharges are lower for churned customers due to shorter tenure.
+- Standard deviation of tenure is higher in the No class, meaning 
+  loyal customers have more varied subscription lengths.
+  
+## 11.2 Average MonthlyCharges Comparison between Two Groups
+
+```{r group-comparison}
+# Calculate average MonthlyCharges by Churn group
+avg_by_churn <- df_clean %>%
+  group_by(Churn) %>%
+  summarise(
+    Mean_MonthlyCharges = round(mean(MonthlyCharges, na.rm = TRUE), 2),
+    Median_MonthlyCharges = round(median(MonthlyCharges, na.rm = TRUE), 2),
+    Mean_tenure = round(mean(tenure, na.rm = TRUE), 2),
+    Median_tenure = round(median(tenure, na.rm = TRUE), 2),
+    Count = n()
+  )
+
+cat("=== Average Comparison by Churn Class ===\n")
+print(avg_by_churn)
+
+# Visualize MonthlyCharges comparison
+p1 <- ggplot(df_clean, aes(x = Churn, y = MonthlyCharges, fill = Churn)) +
+  geom_bar(stat = "summary", fun = "mean") +
+  scale_fill_manual(values = c("#3B8BD4", "#E8593C")) +
+  labs(title = "Average MonthlyCharges by Churn",
+       x = "Churn", y = "Average Monthly Charges") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+# Visualize tenure comparison
+p2 <- ggplot(df_clean, aes(x = Churn, y = tenure, fill = Churn)) +
+  geom_bar(stat = "summary", fun = "mean") +
+  scale_fill_manual(values = c("#3B8BD4", "#E8593C")) +
+  labs(title = "Average Tenure by Churn",
+       x = "Churn", y = "Average Tenure (months)") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+grid.arrange(p1, p2, ncol = 2)
+```
+**Interpretation:**
+The average MonthlyCharges and tenure are compared across the two 
+Churn classes. Key findings:
+- Churned customers (Yes) pay higher average MonthlyCharges 
+  compared to retained customers (No), suggesting that higher 
+  billing is associated with increased churn likelihood.
+- Retained customers (No) have significantly higher average tenure, 
+  confirming that long-term customers are more loyal and less 
+  likely to leave.
+- These differences highlight MonthlyCharges and tenure as 
+  important indicators of customer churn behavior.
+  
+## 11.3 Variance of MonthlyCharges across Contract Types
+
+```{r variance-analysis}
+# Variance and SD of MonthlyCharges across Contract types
+variance_table <- df_clean %>%
+  group_by(Contract) %>%
+  summarise(
+    Count = n(),
+    Mean = round(mean(MonthlyCharges, na.rm = TRUE), 2),
+    SD = round(sd(MonthlyCharges, na.rm = TRUE), 2),
+    Variance = round(var(MonthlyCharges, na.rm = TRUE), 2),
+    Min = round(min(MonthlyCharges, na.rm = TRUE), 2),
+    Max = round(max(MonthlyCharges, na.rm = TRUE), 2)
+  )
+
+cat("=== Variance of MonthlyCharges by Contract Type ===\n")
+print(variance_table)
+
+# Boxplot to visualize spread
+ggplot(df_clean, aes(x = Contract, y = MonthlyCharges, fill = Contract)) +
+  geom_boxplot(alpha = 0.7) +
+  scale_fill_manual(values = c("#3B8BD4", "#1D9E75", "#E8593C")) +
+  labs(title = "Spread of MonthlyCharges across Contract Types",
+       x = "Contract Type", y = "Monthly Charges") +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+**Interpretation:**
+The variance and spread of MonthlyCharges are analyzed across 
+three contract types. Key findings:
+- Two-year contracts show the highest variance (1134) and the 
+  widest spread in the boxplot. This indicates that long-term 
+  customers choose a wide variety of plans, ranging from basic 
+  to premium, resulting in greater price diversity.
+- One-year contracts have moderate variance (1034), showing 
+  intermediate price spread.
+- Month-to-month contracts have the lowest variance (702), 
+  suggesting that short-term customers tend to cluster around 
+  a more consistent price range.
+- The boxplot confirms this pattern — Two-year and One-year 
+  contract boxes are visibly wider than Month-to-month.
+  
+## 11.4 Churn Rate by Contract Type
+
+```{r churn-by-contract}
+# Churn rate by contract type
+churn_contract <- df_clean %>%
+  group_by(Contract, Churn) %>%
+  summarise(Count = n(), .groups = "drop") %>%
+  group_by(Contract) %>%
+  mutate(Percentage = round(Count/sum(Count)*100, 2))
+
+cat("=== Churn Rate by Contract Type ===\n")
+print(churn_contract)
+
+# Visualize
+ggplot(churn_contract, aes(x = Contract, y = Percentage, fill = Churn)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  scale_fill_manual(values = c("#3B8BD4", "#E8593C")) +
+  geom_text(aes(label = paste0(Percentage, "%")),
+            position = position_dodge(width = 0.9),
+            vjust = -0.5, size = 3) +
+  labs(title = "Churn Rate by Contract Type",
+       x = "Contract Type", y = "Percentage (%)") +
+  theme_minimal()
+```
+**Interpretation:**
+Churn rate is analyzed across three contract types to identify 
+which contract segment is most at risk. Key findings:
+- Month-to-month contract customers have the highest churn rate, 
+  confirming that short-term contracts are strongly associated 
+  with customer attrition.
+- Two-year contract customers show the lowest churn rate, 
+  indicating that longer commitments lead to greater customer 
+  retention.
+- This finding directly supports the filtering result from 
+  Section 8, where month-to-month customers were identified 
+  as a high-risk segment.
+  
+# 12. Objectives and Findings Summary
+
+## 12.1 Objectives Achieved
+
+The following objectives set at the beginning of this project 
+have been successfully completed:
+
+- Data preparation and cleaning techniques were applied to a 
+  real-world dataset containing intentionally introduced issues.
+- Missing values, outliers, duplicates, and inconsistent formats 
+  were detected and handled systematically.
+- Exploratory Data Analysis was performed on key variables to 
+  extract meaningful insights.
+- Descriptive statistics were calculated and compared across 
+  the two target classes (Churn: Yes / No).
+- Normalization, encoding, filtering, class balancing, and 
+  train/test splitting were demonstrated successfully.
+
+## 12.2 Key Findings
+
+**Finding 1 — Tenure and Churn:**
+Churned customers have a significantly lower average tenure 
+(17.8 months) compared to retained customers (38.1 months). 
+Customers who leave do so early in their subscription period.
+
+**Finding 2 — MonthlyCharges and Churn:**
+Churned customers pay higher average MonthlyCharges (73.6) 
+compared to retained customers (60.2). Higher billing is 
+strongly associated with increased likelihood of churn.
+
+**Finding 3 — Contract Type and Churn:**
+Month-to-month contract customers show the highest churn rate 
+(40.49%), while two-year contract customers show the lowest 
+(1.78%). Longer contract commitments strongly reduce churn risk.
+
+**Finding 4 — Variance across Contract Types:**
+Two-year contracts show the highest variance in MonthlyCharges 
+(1134), indicating diverse pricing plans among long-term 
+customers. Month-to-month contracts have the lowest variance 
+(702), suggesting more uniform pricing for short-term customers.
+
+**Finding 5 — Class Imbalance:**
+The dataset showed a significant class imbalance (76% No, 24% 
+Yes). ROSE balancing successfully brought both classes to 
+approximately equal distribution (52% vs 48%), making the 
+data suitable for future modeling.
+
+**Finding 6 — Senior Citizens:**
+Filtered analysis identified senior citizens as a notable 
+high-risk segment, with a higher proportion appearing among 
+churned customers compared to retained customers.
